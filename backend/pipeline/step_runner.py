@@ -6,7 +6,7 @@ import xml.etree.ElementTree as ET
 TAP_WORDS = {"tap", "click", "press", "select", "choose", "open", "toggle", "tick"}
 TYPE_WORDS = {"type", "enter", "input", "fill", "write"}
 VERIFY_WORDS = {"verify", "assert", "confirm", "check", "expect", "see"}
-DROP_WORDS = {"button", "btn", "field", "icon", "link", "tab", "checkbox", "radio", "option", "the"}
+DROP_WORDS = {"button", "btn", "field", "icon", "link", "tab", "checkbox", "radio", "option", "the", "arrow"}
 TOGGLE_CLASSES = ("CheckBox", "RadioButton", "Switch", "ToggleButton", "CompoundButton")
 
 
@@ -82,21 +82,36 @@ def is_toggle(n):
 
 
 def toggle_in_row(nodes, node):
-    """If the matched label sits next to a checkbox/radio/switch, return that control."""
+    """If the matched label belongs to a checkbox/radio/switch/chip, return that control.
+
+    Controls in the same row are ranked by horizontal distance to the label
+    (0 = the label sits inside the control, e.g. a filter chip). The old version
+    compared vertical distance only, so in a row of chips every chip tied and the
+    first chip was always returned. If several controls are equally close, return
+    None so the caller taps the label itself instead of guessing."""
     if is_toggle(node):
         return node
     cy = (node["y1"] + node["y2"]) // 2
-    tol = max(50, node["y2"] - node["y1"])
+    # Wide vertical tolerance: in checkbox rows the label text is often top-aligned,
+    # so its centre can sit ~70px above the checkbox centre. Rows are >150px apart.
+    tol = max(90, node["y2"] - node["y1"])
     cands = []
     for n in nodes:
         if n is node or not is_toggle(n):
             continue
         ncy = (n["y1"] + n["y2"]) // 2
-        if abs(ncy - cy) <= tol:
-            cands.append((abs(ncy - cy), n))
+        vdist = abs(ncy - cy)
+        if vdist > tol:
+            continue
+        gap = max(0, node["x1"] - n["x2"], n["x1"] - node["x2"])
+        area = (n["x2"] - n["x1"]) * (n["y2"] - n["y1"])
+        cands.append((gap, vdist, area, n))
     if not cands:
         return None
-    return min(cands, key=lambda c: c[0])[1]
+    cands.sort(key=lambda c: (c[0], c[1], c[2]))
+    if len(cands) > 1 and cands[0][:2] == cands[1][:2] and cands[0][0] != 0:
+        return None
+    return cands[0][3]
 
 
 def screen_labels(nodes, limit=40):

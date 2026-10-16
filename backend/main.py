@@ -53,3 +53,38 @@ async def run_test(apk_path: str = Form(...), instruction: str = Form(...)):
 
 # Serves screenshot images so the Next.js dashboard can display them
 app.mount("/runs", StaticFiles(directory="storage/runs"), name="runs")
+
+import json
+
+
+@app.get("/runs-list")
+def runs_list():
+    """Summary of the most recent test runs, newest first (used by the dashboard history tab)."""
+    base = "storage/runs"
+    items = []
+    for name in sorted(os.listdir(base), reverse=True)[:40]:
+        folder = os.path.join(base, name)
+        result_path = os.path.join(folder, "result.json")
+        if not (name.startswith("run_") and os.path.isfile(result_path)):
+            continue
+        try:
+            with open(result_path) as f:
+                r = json.load(f)
+        except Exception:
+            continue
+        passed = None
+        steps_path = os.path.join(folder, "steps.json")
+        if os.path.isfile(steps_path):
+            try:
+                with open(steps_path) as f:
+                    passed = sum(1 for s in json.load(f) if s.get("status") == "passed")
+            except Exception:
+                passed = None
+        items.append({
+            "run": name,
+            "status": r.get("status"),
+            "instruction": (r.get("instruction") or "")[:160],
+            "total_steps": len(r.get("parsed_actions") or []),
+            "passed_steps": passed,
+        })
+    return items

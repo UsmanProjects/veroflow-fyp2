@@ -31,9 +31,10 @@ def save_run_artifacts(run_dir, instruction, result):
 
 def run_full_test(apk_path: str, instruction: str):
     from pipeline.step_runner import run_steps
+    from pipeline.agent_runner import run_agent_steps
     from pipeline.quick_parser import quick_parse
     from pipeline.phase1_nlp_parser import parse_instruction
-    from pipeline.phase3_screen_labeler import label_screen
+    from pipeline.llm_client import label_screen
     from pipeline.phase4_clip_encoder import get_image_vector
     from pipeline.phase6_chromadb_rag import find_similar_screen, store_screen
 
@@ -82,7 +83,7 @@ def run_full_test(apk_path: str, instruction: str):
 
         trace = []
         try:
-            run_steps(driver, parsed_actions, run_dir, trace)
+            (run_agent_steps if os.environ.get("VEROFLOW_MODE") == "agent" else run_steps)(driver, parsed_actions, run_dir, trace)
         finally:
             result["generated_code"] = "\n".join(trace)
 

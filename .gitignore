@@ -22,3 +22,14 @@ backend/storage/chroma_data/*
 
 # OS junk
 .DS_Store
+backend/veroflow_env.sh
+.env
+*.env
+backend/venv/
+__pycache__/
+*.pyc
+veroflow-dashboard/node_modules/
+veroflow-dashboard/.next/
+backend/storage/runs/
+backend/storage/chroma_data/
+backend/storage/apks/

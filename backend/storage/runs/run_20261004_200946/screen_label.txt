@@ -1,4 +1,0 @@
-Screen Name: Loading Screen
-Elements: 
-- A loading icon in the center of the screen
-- A progress bar at the bottom of the screen

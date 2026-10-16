@@ -1,5 +1,0 @@
-Screen Name: Welcome Screen
-Elements: 
-- Skip button
-- Discover Apartments text
-- Next button

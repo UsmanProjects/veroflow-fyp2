@@ -1,2 +1,0 @@
-Tap Skip, tap Continue as Guest, tap Apartment Card, tap Book Now, tap 21, tap 26, tap Continue, tap Continue, verify Booking Summary, tap I agree to the Booking Policy,
-tap Continue to Payment, verify Credit Card, tap Cash, tap Pay
