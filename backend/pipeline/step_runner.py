@@ -41,6 +41,10 @@ def visible_nodes(driver):
             "rid": rid_label(el.attrib.get("resource-id", "")),
             "clickable": el.attrib.get("clickable") == "true",
             "enabled": el.attrib.get("enabled") != "false",
+            "checked": el.attrib.get("checked") == "true",
+            "selected": el.attrib.get("selected") == "true",
+            "focused": el.attrib.get("focused") == "true",
+            "password": el.attrib.get("password") == "true",
             "x1": x1, "y1": y1, "x2": x2, "y2": y2,
         })
     return nodes

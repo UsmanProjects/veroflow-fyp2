@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 
@@ -31,6 +32,8 @@ def screen_name_of(label):
 
 
 def nearest_text(nodes, ctrl):
+    # A label sitting inside the control (filter chips, merged labels) belongs to it.
+    # Without this, every chip in a row got the NEXT chip's name.
     inside = [n for n in nodes
               if n["text"] and ctrl["x1"] <= (n["x1"] + n["x2"]) // 2 <= ctrl["x2"]
               and ctrl["y1"] <= (n["y1"] + n["y2"]) // 2 <= ctrl["y2"]]
@@ -70,6 +73,104 @@ def describe_elements(nodes, limit=40):
 
 def signature(nodes):
     return tuple((n["text"], n["desc"], n["x1"], n["y1"]) for n in nodes)
+
+
+def content_sig(nodes):
+    """Like signature() but ignores the status bar (clock, battery) so only app content counts."""
+    return tuple((n["text"], n["desc"], n["x1"], n["y1"]) for n in nodes if n["y1"] > 160)
+
+
+def region_changed(driver, before_png, node, min_fraction=0.03):
+    """Pixel check for widgets whose selected look is not exposed in the UI tree (many Flutter
+    choice chips / option tiles): did the pixels inside the control change since before_png?"""
+    if not before_png:
+        return False
+    try:
+        import io
+        from PIL import Image
+        a = Image.open(before_png).convert("L")
+        b = Image.open(io.BytesIO(driver.get_screenshot_as_png())).convert("L")
+        if b.size != a.size:
+            b = b.resize(a.size)
+        win = driver.get_window_size()
+        sx, sy = a.width / win["width"], a.height / win["height"]
+        box = (max(0, int(node["x1"] * sx)), max(0, int(node["y1"] * sy)),
+               min(a.width, int(node["x2"] * sx)), min(a.height, int(node["y2"] * sy)))
+        if box[2] <= box[0] or box[3] <= box[1]:
+            return False
+        ca, cb = a.crop(box), b.crop(box)
+        diff = sum(1 for p, q in zip(ca.getdata(), cb.getdata()) if abs(p - q) > 25)
+        return diff / max(1, ca.width * ca.height) >= min_fraction
+    except Exception:
+        return False
+
+
+def _fill_colour(img, box):
+    """Dominant (median) colour of the inner part of a control: its fill, ignoring text/outline."""
+    w, h = box[2] - box[0], box[3] - box[1]
+    inner = img.crop((box[0] + w // 8, box[1] + h // 6, box[2] - w // 8, box[3] - h // 6)).convert("RGB")
+    px = list(inner.resize((24, 8)).getdata())
+    return tuple(sorted(p[c] for p in px)[len(px) // 2] for c in range(3))
+
+
+def looks_selected(before_png, window, node, nodes):
+    """Was this choice already selected before we tapped it (e.g. a default option)?
+    Tapping an already-selected choice chip changes nothing, which is not a failure.
+    1) the UI tree says checked/selected; 2) otherwise the look: a tinted fill that its sibling
+    controls in the same row do not have (Material 'selected chip')."""
+    if node.get("selected") or node.get("checked"):
+        return True
+    try:
+        from PIL import Image
+        im = Image.open(before_png).convert("RGB")
+        sx, sy = im.width / window["width"], im.height / window["height"]
+
+        def box_of(n):
+            return (int(n["x1"] * sx), int(n["y1"] * sy), int(n["x2"] * sx), int(n["y2"] * sy))
+
+        def chroma(c):
+            return max(c) - min(c)
+
+        mine = _fill_colour(im, box_of(node))
+        cy = (node["y1"] + node["y2"]) // 2
+        sibs = [n for n in nodes if n is not node and is_toggle(n)
+                and abs((n["y1"] + n["y2"]) // 2 - cy) <= 60]
+        if not sibs:
+            return False   # a lone checkbox: no way to tell by looks, so do not guess
+        if chroma(mine) < 12:
+            return False
+        return all(chroma(mine) - chroma(_fill_colour(im, box_of(s))) >= 8 for s in sibs)
+    except Exception:
+        return False
+
+
+def toggle_changed(driver, node, before_nodes, wait=5, before_png=None):
+    """True when the checkbox/chip at node's position flipped, its pixels changed (selected
+    highlight), or the app content changed (e.g. a filter was applied and the list reloaded),
+    within `wait` seconds."""
+    cx, cy = (node["x1"] + node["x2"]) // 2, (node["y1"] + node["y2"]) // 2
+    before = content_sig(before_nodes)
+    deadline = time.time() + wait
+    while True:
+        time.sleep(0.8)
+        try:
+            now = visible_nodes(driver)
+        except Exception:
+            now = []
+        if now:
+            same = [n for n in now if is_toggle(n)
+                    and n["x1"] <= cx <= n["x2"] and n["y1"] <= cy <= n["y2"]]
+            if not same:  # the control is gone: the screen moved on
+                return True
+            if (same[0].get("checked") != node.get("checked")
+                    or same[0].get("selected") != node.get("selected")):
+                return True
+            if content_sig(now) != before:
+                return True
+        if region_changed(driver, before_png, node):
+            return True
+        if time.time() > deadline:
+            return False
 
 
 def wait_stable(driver, max_wait=6):
@@ -328,26 +429,41 @@ def type_into(driver, node, value, trace_notes):
     raise RuntimeError("could not type into the field (" + "; ".join(errors) + ")")
 
 
+def tree_screen_label(nodes):
+    """Fallback screen label from the UI tree: the first real heading text, top to bottom."""
+    skip = {"content", "back", "next", "skip"}
+    texts = []
+    for n in sorted(nodes, key=lambda n: (n["y1"], n["x1"])):
+        t = (n["text"] or n["desc"] or "").strip()
+        if t and t.lower() not in skip and t not in texts:
+            texts.append(t)
+    title = texts[0][:50] if texts else "Unknown screen"
+    return f"Screen Name: {title}\nElements:\n" + "\n".join(f"- {t}" for t in texts[:15])
+
+
 def recognize(png, nodes):
-    """Phase 4 + 6 + 3: CLIP embedding, ChromaDB lookup, vision model label on a miss."""
+    """Phase 4 + 6 + 3: CLIP embedding, ChromaDB lookup, vision model label on a miss.
+    A label that came from a failed vision call is NOT stored, so memory never fills up with
+    'Unlabeled' screens; stored 'Unlabeled' entries from older runs are ignored."""
     try:
         from pipeline.phase4_clip_encoder import get_image_vector
         from pipeline.phase6_chromadb_rag import find_similar_screen, store_screen
         vec = get_image_vector(png)
         hit = find_similar_screen(vec)
-        if hit:
+        if hit and "unlabeled" not in screen_name_of(hit["label"]).lower():
             return hit["label"], "memory hit", hit["similarity"]
         try:
             from pipeline.llm_client import label_screen
-            label, source = label_screen(png), "new screen (vision model)"
-        except Exception:
-            texts = [t for t in dict.fromkeys(n["text"] or n["desc"] for n in nodes) if t][:15]
-            label = "Screen Name: Unlabeled\nElements:\n" + "\n".join(f"- {t}" for t in texts)
-            source = "new screen (UI tree label, vision model unavailable)"
-        store_screen(vec, label, png)
-        return label, source, None
+            label = label_screen(png)
+            store_screen(vec, label, png)
+            return label, "new screen (vision model)", None
+        except Exception as e:
+            err = " ".join(str(e).split())  # one line, no JSON line breaks
+            print(f"[VeroFlow] vision label call FAILED -> nothing stored in memory. Error: {err[:600]}", flush=True)
+            return (tree_screen_label(nodes),
+                    f"new screen (UI tree label; vision model error: {err[:240]})", None)
     except Exception as e:
-        return "", f"recognition failed: {e}", None
+        return tree_screen_label(nodes), f"recognition failed: {str(e)[:80]}", None
 
 
 def ask_llm(action, target, value, screen_name, items, history, image_path=None):
@@ -389,15 +505,77 @@ def bounds_str(n):
     return f"[{n['x1']},{n['y1']}][{n['x2']},{n['y2']}]"
 
 
-def run_agent_steps(driver, actions, run_dir, trace):
-    steps, screens, history = [], [], []
-    trace.append("# Generated by VeroFlow agent mode: NLP actions + screen recognition + LLM element resolution")
-    trace.append("from appium.webdriver.common.appiumby import AppiumBy")
-    trace.append("")
-    trace.append("def run(driver):")
+def _norm(t):
+    return re.sub(r"[^0-9A-Za-z]", "", str(t))
+
+
+MASKS = set("\u2022*\u25cf\u00b7\u2219")
+
+
+def field_text(driver, node):
+    """Current text of the field we just typed into (focused EditText first, else the one
+    at the same place). None if it cannot be read."""
     try:
-        time.sleep(2)
-        for i, a in enumerate(actions, 1):
+        nodes = visible_nodes(driver)
+    except Exception:
+        return None
+    edits = [n for n in nodes if n["cls"].endswith("EditText")]
+    focused = [n for n in edits if n.get("focused")]
+    if focused:
+        return focused[0]["text"]
+    cx, cy = (node["x1"] + node["x2"]) // 2, (node["y1"] + node["y2"]) // 2
+    for n in edits:
+        if n["x1"] <= cx <= n["x2"] and n["y1"] <= cy <= n["y2"]:
+            return n["text"]
+    return None
+
+
+def typed_ok(actual, value):
+    """True/False when we can tell, None when the field text is unreadable (hint only)."""
+    if actual is None or actual == "":
+        return None
+    value = str(value)
+    if set(actual) <= MASKS:                     # password dots: compare the length
+        return len(actual) == len(value)
+    return _norm(actual) == _norm(value)
+
+
+ERROR_RE = re.compile(r"\b(required|invalid|must (be|accept|enter|select)|please (enter|select|confirm|provide|accept)"
+                      r"|incorrect|does not match|do not match|not match|error|failed"
+                      r"|not valid|a valid|too (short|long|weak)|(cannot|can't|can not) be (empty|blank))\b", re.I)
+
+
+def unexpected_errors(nodes, actions):
+    """Validation messages on the final screen that no verify step asked for."""
+    expected = [_norm(a.get("target", "")).lower() for a in actions
+                if str(a.get("action", "")).lower() in VERIFY_WORDS]
+    found = []
+    for n in nodes:
+        t = (n["text"] or n["desc"] or "").strip()
+        if t and ERROR_RE.search(t) and not any(e and e in _norm(t).lower() for e in expected):
+            if t not in found:
+                found.append(t)
+    return found
+
+
+def run_agent_steps(driver, actions, run_dir, trace, state=None, final_scan=True, use_llm=True):
+    """Execute `actions` one by one.
+    state      : optional dict {"steps","screens","history"} so goal mode can call this once per
+                 action and keep ONE continuous, globally numbered step log.
+    final_scan : fail when validation errors are still shown after the last action.
+    use_llm    : False = the caller (goal planner) already chose the target, so skip the resolver call."""
+    if state is None:
+        state = {"steps": [], "screens": [], "history": []}
+        trace.append("# Generated by VeroFlow agent mode: NLP actions + screen recognition + LLM element resolution")
+        trace.append("from appium.webdriver.common.appiumby import AppiumBy")
+        trace.append("")
+        trace.append("def run(driver):")
+    steps, screens, history = state["steps"], state["screens"], state["history"]
+    try:
+        if not steps:
+            time.sleep(2)
+        for a in actions:
+            i = len(steps) + 1
             action = str(a.get("action", "tap")).lower().strip()
             target = str(a.get("target", "")).strip()
             value = a.get("value") or a.get("text") or a.get("input") or ""
@@ -463,11 +641,14 @@ def run_agent_steps(driver, actions, run_dir, trace):
 
                 items = describe_elements(nodes)
                 chosen, decided, llm_s = None, "llm", None
+                llm_choice = None
                 # Exactly one element carries the target's exact label: nothing for the LLM to
                 # disambiguate, so skip the call (saves API quota and ~5-10 s per step).
                 exact = [n for n in nodes if node_score(tt, n) >= 100]
                 if len(exact) == 1 and action not in TYPE_WORDS:
                     chosen, decided, llm_s = exact[0], "exact label match (LLM skipped)", 0.0
+                elif not use_llm:
+                    chosen, decided, llm_s = None, "label match (target chosen by the goal planner)", 0.0
                 else:
                     t0 = time.time()
                     try:
@@ -483,12 +664,18 @@ def run_agent_steps(driver, actions, run_dir, trace):
                 chosen_score = node_score(tt, chosen)
                 if chosen is None:
                     chosen = det
-                    if not decided.startswith("fallback"):
+                    if use_llm and not decided.startswith("fallback"):
                         decided = "fallback (LLM returned no valid element)"
                 elif det is not None and det_score >= 60 and chosen_score < 20:
                     chosen, decided = det, "validator override (LLM choice contradicted an exact label match)"
                 elif action in VERIFY_WORDS and chosen_score < 20:
                     chosen, decided = (det, "validator override (verify needs matching text)") if det else (None, decided)
+                elif (action in TYPE_WORDS and det is None
+                      and not any(w in target.lower() for w in ICONISH)):
+                    # No field on screen is labelled like the target (e.g. "Confirm Password" is
+                    # still below the keyboard). The LLM would pick the nearest field, which typed
+                    # the password twice into the same box. Look further before trusting it.
+                    llm_choice, chosen, decided = chosen, None, "rejected (no field labelled like the target on screen)"
                 elif (action not in VERIFY_WORDS and det is None and chosen_score < 20
                       and node_label(chosen) and not chosen["cls"].endswith("EditText")
                       and not any(w in target.lower() for w in ICONISH)):
@@ -511,6 +698,10 @@ def run_agent_steps(driver, actions, run_dir, trace):
                     if found is not None:
                         chosen, decided = found, f"auto-scroll ({scrolled} swipes to find it)"
                         trace.append(f"    # step {i}: target not visible, scrolled {scrolled}x to find it")
+
+                if chosen is None and llm_choice is not None and scrolled == 0:
+                    # nothing further to scroll to: fall back to the LLM's semantic pick
+                    chosen, decided = llm_choice, "LLM semantic match (no label match on screen)"
 
                 if chosen is None:
                     labels = [lbl for _, lbl, _ in items][:30]
@@ -587,13 +778,67 @@ def run_agent_steps(driver, actions, run_dir, trace):
                         time.sleep(0.5)
                         how = type_into(driver, node, value, trace)
                         step["executed_via"] = f"{step['executed_via']} + typed via {how}"
+                        actual = field_text(driver, node)
+                        if typed_ok(actual, value) is False:
+                            step["error"] = (f"Step {i} (type '{target}') failed: typed {str(value)!r} but the field "
+                                             f"shows {actual!r}")
+                            try:
+                                driver.get_screenshot_as_file(f"{run_dir}/step_{i}.png")
+                            except Exception:
+                                pass
+                            raise RuntimeError(step["error"])
                         hide_keyboard(driver)  # so the next field is not hidden under the keyboard
                         trace.append(f"    driver.find_element(AppiumBy.XPATH, '{xp}').send_keys({str(value)!r})" if xp
                                      else f"    # type {str(value)!r} into '{node_label(chosen)}'")
                     else:
+                        if is_toggle(node) and not node["cls"].endswith("RadioButton"):
+                            # Some screens apply a chip/checkbox only after a short load, and a tap that
+                            # lands while the screen is still settling is swallowed. So: wait for the
+                            # state (or the screen content) to change, tap once more if nothing happened,
+                            # and only then call it a failure.
+                            ok = toggle_changed(driver, node, nodes, 5, before_png)
+                            if not ok and looks_selected(before_png, driver.get_window_size(), node, nodes):
+                                # e.g. 'In-Person Consultation' is preselected: the tap is harmless and the
+                                # requested option IS selected, so the step's intent is met.
+                                step["executed_via"] = f"{step['executed_via']} (option was already selected)"
+                                ok = True
+                            if not ok:
+                                try:
+                                    tap_node(driver, node)
+                                    step["executed_via"] = f"{step['executed_via']} + retried tap"
+                                except Exception:
+                                    pass
+                                ok = toggle_changed(driver, node, nodes, 4, before_png)
+                            if not ok:
+                                step["error"] = (f"Step {i} (tap '{target}') failed: tapped {bounds_str(node)} "
+                                                 f"[{step['tapped']}] twice but the "
+                                                 f"{node['cls'].split('.')[-1]} did not change state "
+                                                 f"(still {'checked' if node.get('checked') else 'unchecked'}), its "
+                                                 f"pixels did not change and the screen content did not change. "
+                                                 f"Matched label: '{step['matched']}'. See step_{i}_before.png.")
+                                try:
+                                    driver.get_screenshot_as_file(f"{run_dir}/step_{i}.png")
+                                except Exception:
+                                    pass
+                                raise RuntimeError(step["error"])
                         trace.append(f"    driver.find_element(AppiumBy.XPATH, '{xp}').click()" if xp
                                      else f"    driver.execute_script('mobile: clickGesture', "
                                           f"{{'x': {(node['x1'] + node['x2']) // 2}, 'y': {(node['y1'] + node['y2']) // 2}}})")
+                if action not in VERIFY_WORDS and action not in TYPE_WORDS:
+                    # A snackbar such as "Added to cart!" disappears within ~2 s. Read the screen right
+                    # after the tap so the planner learns that the tap worked even if nothing else changed.
+                    try:
+                        before_t = {t for n in nodes for t in (n["text"], n["desc"]) if t}
+                        appeared = []
+                        for _ in range(2):
+                            time.sleep(0.4)
+                            for n in visible_nodes(driver):
+                                for t in (n["text"], n["desc"]):
+                                    if t and t not in before_t and t not in appeared:
+                                        appeared.append(t)
+                        step["appeared"] = appeared[:6]
+                    except Exception:
+                        pass
                 history.append(f"{action} {node_label(chosen) or target}")
                 step["status"] = "passed"
 
@@ -610,6 +855,20 @@ def run_agent_steps(driver, actions, run_dir, trace):
                     except Exception:
                         break
                 time.sleep(1)
+        # All steps ran. A form that still shows validation errors nobody asked to verify is a failure.
+        try:
+            final_nodes = visible_nodes(driver)
+        except Exception:
+            final_nodes = []
+        # Evidence for the report: every text the final screen shows (so a PASSED verdict can be audited)
+        try:
+            with open(f"{run_dir}/final_screen.json", "w") as f:
+                json.dump({"visible_text": [t for n in final_nodes for t in (n["text"], n["desc"]) if t]}, f, indent=2)
+        except Exception:
+            pass
+        errs = unexpected_errors(final_nodes, actions) if final_scan else []
+        if errs:
+            raise RuntimeError("All steps ran, but the final screen still shows validation errors: " + "; ".join(errs[:6]))
     finally:
         for fname, data in (("steps.json", steps), ("screens.json", screens)):
             try:

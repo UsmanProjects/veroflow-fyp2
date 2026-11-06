@@ -1,0 +1,82 @@
+{
+  "app": "VeroShop",
+  "test_cases": [
+    {
+      "id": "TC-01", "title": "Login with valid credentials", "type": "positive", "priority": "high",
+      "expected_verdict": "PASS",
+      "goal": "Open the application and log in with the email and password from the test data.",
+      "expected": ["\"Featured Products\"", "\"Categories\"", "NOT \"Sign in to your account\""]
+    },
+    {
+      "id": "TC-02", "title": "Search and open a product", "type": "positive", "priority": "high",
+      "expected_verdict": "PASS",
+      "precondition": "Log in with the email and password from the test data (skip if already logged in).",
+      "goal": "Search for {search_term}, open {product_b} from the results and view its details.",
+      "expected": ["\"{product_b}\"", "\"{product_b_price}\"", "\"Description\"", "\"Add to Cart\""]
+    },
+    {
+      "id": "TC-03", "title": "Add two products and change quantity in the cart", "type": "positive", "priority": "high",
+      "expected_verdict": "PASS",
+      "precondition": "Log in with the email and password from the test data (skip if already logged in).",
+      "goal": "Add {product_a} and {product_b} to the cart, open the cart and increase the quantity of {product_a} to {quantity}.",
+      "expected": ["\"My Cart\"", "\"{product_a}\"", "\"{product_b}\"", "\"Checkout\"",
+                   "In the cart, the quantity shown next to {product_a} is {quantity}"]
+    },
+    {
+      "id": "TC-04", "title": "Place an order from product details", "type": "positive", "priority": "high",
+      "expected_verdict": "PASS",
+      "precondition": "Log in with the email and password from the test data (skip if already logged in).",
+      "goal": "Search for {product_a}, open its details, set the quantity to {quantity}, add it to the cart, go to checkout and place the order.",
+      "expected": ["\"Order Placed!\"", "\"Your order has been successfully placed.\"", "\"Order ID\""]
+    },
+    {
+      "id": "TC-05", "title": "New order appears in My Orders", "type": "positive", "priority": "medium",
+      "expected_verdict": "PASS",
+      "precondition": "Log in with the email and password from the test data (skip if already logged in).",
+      "goal": "Place an order for {product_b}, note the Order ID shown on the confirmation screen, then open My Orders.",
+      "expected": ["\"My Orders\"",
+                   "The order ID that was shown on the confirmation screen is listed in My Orders",
+                   "That order shows the status Processing"]
+    },
+    {
+      "id": "TC-08", "title": "Login rejected with a wrong password", "type": "negative", "priority": "high",
+      "expected_verdict": "PASS",
+      "goal": "Open the application, go to Login and try to sign in with the email from the test data and the wrong_password from the test data.",
+      "expected": ["\"Welcome Back\"", "NOT \"Featured Products\""]
+    },
+    {
+      "id": "TC-09", "title": "Registration rejected when passwords do not match", "type": "negative", "priority": "medium",
+      "expected_verdict": "PASS",
+      "goal": "Open the application, go to Register and fill First Name {reg_first_name}, Last Name {reg_last_name}, Email Address {reg_email}, Phone Number {reg_phone}, Password {reg_password}, Confirm Password {reg_password_mismatch}, accept the terms and tap Create Account.",
+      "expected": ["\"Create Account\"", "NOT \"Featured Products\""]
+    },
+    {
+      "id": "TC-10", "title": "Registration rejected without accepting the terms", "type": "negative", "priority": "medium",
+      "expected_verdict": "PASS",
+      "goal": "Open the application, go to Register, fill every field with the reg_ values from the test data (both passwords {reg_password}), do NOT accept the terms, and tap Create Account.",
+      "expected": ["\"Create Account\"", "NOT \"Featured Products\""]
+    },
+    {
+      "id": "TC-11", "title": "Cart total equals the sum of the items", "type": "positive", "priority": "medium",
+      "expected_verdict": "PASS",
+      "precondition": "Log in with the email and password from the test data (skip if already logged in).",
+      "goal": "Add {product_a} to the cart and open the cart.",
+      "expected": ["\"My Cart\"", "\"Total\"",
+                   "The Total equals the sum of price x quantity of every item shown in the cart"]
+    },
+    {
+      "id": "TC-12", "title": "Control: a product that does not exist cannot be opened", "type": "control", "priority": "high",
+      "expected_verdict": "FAIL",
+      "precondition": "Log in with the email and password from the test data (skip if already logged in).",
+      "goal": "Search for {missing_product} and open its product details.",
+      "expected": ["\"{missing_product}\"", "\"Description\""]
+    },
+    {
+      "id": "TC-13", "title": "Control: product details do not show a feature the app does not have", "type": "control", "priority": "high",
+      "expected_verdict": "FAIL",
+      "precondition": "Log in with the email and password from the test data (skip if already logged in).",
+      "goal": "Search for {search_term} and open {product_b} from the results.",
+      "expected": ["\"{product_b}\"", "\"Free Delivery Today\""]
+    }
+  ]
+}

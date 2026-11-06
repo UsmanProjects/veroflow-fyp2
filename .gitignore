@@ -33,3 +33,4 @@ veroflow-dashboard/.next/
 backend/storage/runs/
 backend/storage/chroma_data/
 backend/storage/apks/
+backend/test_data.json
